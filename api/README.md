@@ -1,3 +1,19 @@
-# API Service
+# API Service (FastAPI)
 
-Planned: FastAPI service for auth, couple binding, daily entries, conflict mediation and weekly reports.
+## Quick Start
+
+```bash
+cd api
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
+
+Open: http://127.0.0.1:8000/docs
+
+## Planned modules
+- Daily journaling APIs
+- Conflict mediation APIs
+- Weekly report APIs
+- MemOS integration service
