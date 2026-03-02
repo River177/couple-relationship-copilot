@@ -16,8 +16,9 @@ Mobile-first AI product for couples:
 ## Monorepo Structure
 - `app/` Flutter client
 - `api/` FastAPI backend
+  - `api/sql/` DB schema source of truth
 - `docs/` PRD / flows / API specs
-- `infra/` deployment and environment templates
+- `infra/` deployment and environment templates (e.g. MinIO compose)
 
 ## Next Steps
 1. Bootstrap Flutter app
