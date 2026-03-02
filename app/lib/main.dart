@@ -65,10 +65,15 @@ class HomePage extends StatelessWidget {
               },
             ),
             const SizedBox(height: 12),
-            const _EntryCard(
+            _EntryCard(
               title: '冲突调解',
-              subtitle: 'Conflict mediation workflow (next)',
+              subtitle: 'Conflict mediation workflow',
               icon: Icons.balance_rounded,
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ConflictPage()),
+                );
+              },
             ),
             const SizedBox(height: 12),
             const _EntryCard(
@@ -384,6 +389,270 @@ class _DailyPageState extends State<DailyPage> {
                 );
               }),
             const SizedBox(height: 24),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ConflictPage extends StatefulWidget {
+  const ConflictPage({super.key});
+
+  @override
+  State<ConflictPage> createState() => _ConflictPageState();
+}
+
+class _ConflictPageState extends State<ConflictPage> {
+  final _dio = Dio(BaseOptions(baseUrl: 'http://127.0.0.1:8000'));
+  final _coupleIdCtrl = TextEditingController();
+  final _sessionIdCtrl = TextEditingController();
+  final _userIdCtrl = TextEditingController();
+  final _factsCtrl = TextEditingController();
+  final _feelingsCtrl = TextEditingController();
+  final _needsCtrl = TextEditingController();
+  final _expectationCtrl = TextEditingController();
+
+  int _emotionScore = 6;
+  bool _loading = false;
+  Map<String, dynamic>? _mediation;
+
+  @override
+  void dispose() {
+    _coupleIdCtrl.dispose();
+    _sessionIdCtrl.dispose();
+    _userIdCtrl.dispose();
+    _factsCtrl.dispose();
+    _feelingsCtrl.dispose();
+    _needsCtrl.dispose();
+    _expectationCtrl.dispose();
+    super.dispose();
+  }
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _createSession() async {
+    if (_coupleIdCtrl.text.isEmpty) {
+      _toast('先输入 couple_id');
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      final resp = await _dio.post(
+        '/conflict/session',
+        queryParameters: {'couple_id': _coupleIdCtrl.text.trim()},
+      );
+      _sessionIdCtrl.text = (resp.data['id'] ?? '').toString();
+      _toast('冲突会话已创建');
+    } on DioException catch (e) {
+      _toast('创建失败: ${e.response?.data ?? e.message}');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _submitInput() async {
+    if (_sessionIdCtrl.text.isEmpty || _userIdCtrl.text.isEmpty) {
+      _toast('session_id / user_id 不能为空');
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      await _dio.post(
+        '/conflict/input',
+        data: {
+          'session_id': _sessionIdCtrl.text.trim(),
+          'user_id': _userIdCtrl.text.trim(),
+          'facts': _factsCtrl.text.trim(),
+          'feelings': _feelingsCtrl.text.trim(),
+          'needs': _needsCtrl.text.trim(),
+          'expectation': _expectationCtrl.text.trim().isEmpty
+              ? null
+              : _expectationCtrl.text.trim(),
+          'emotion_score': _emotionScore,
+        },
+      );
+      _toast('已提交一方输入');
+    } on DioException catch (e) {
+      _toast('提交失败: ${e.response?.data ?? e.message}');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _mediate() async {
+    if (_sessionIdCtrl.text.isEmpty) {
+      _toast('先输入 session_id');
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      final resp = await _dio.post(
+        '/conflict/mediate',
+        queryParameters: {'session_id': _sessionIdCtrl.text.trim()},
+      );
+      setState(() => _mediation = Map<String, dynamic>.from(resp.data as Map));
+      _toast('已生成调解建议');
+    } on DioException catch (e) {
+      _toast('调解失败: ${e.response?.data ?? e.message}');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('冲突调解')),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('会话信息', style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _coupleIdCtrl,
+                    decoration: const InputDecoration(labelText: 'couple_id'),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _sessionIdCtrl,
+                          decoration:
+                              const InputDecoration(labelText: 'session_id'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: _loading ? null : _createSession,
+                        child: const Text('创建'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('一方输入', style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _userIdCtrl,
+                    decoration: const InputDecoration(labelText: 'user_id'),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _factsCtrl,
+                    maxLines: 2,
+                    decoration: const InputDecoration(labelText: 'facts（事实）'),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _feelingsCtrl,
+                    maxLines: 2,
+                    decoration:
+                        const InputDecoration(labelText: 'feelings（感受）'),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _needsCtrl,
+                    maxLines: 2,
+                    decoration: const InputDecoration(labelText: 'needs（需求）'),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    controller: _expectationCtrl,
+                    maxLines: 2,
+                    decoration:
+                        const InputDecoration(labelText: 'expectation（期待，可选）'),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      const Text('emotion'),
+                      Expanded(
+                        child: Slider(
+                          value: _emotionScore.toDouble(),
+                          min: 1,
+                          max: 10,
+                          divisions: 9,
+                          label: '$_emotionScore',
+                          onChanged: (v) =>
+                              setState(() => _emotionScore = v.toInt()),
+                        ),
+                      ),
+                      Text('$_emotionScore'),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: _loading ? null : _submitInput,
+                      icon: const Icon(Icons.send_rounded),
+                      label: const Text('提交输入'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.tonalIcon(
+                onPressed: _loading ? null : _mediate,
+                icon: const Icon(Icons.auto_awesome_rounded),
+                label: Text(_loading ? '处理中...' : '生成调解建议'),
+              ),
+            ),
+            if (_mediation != null) ...[
+              const SizedBox(height: 14),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('今晚行动',
+                          style: Theme.of(context).textTheme.titleSmall),
+                      const SizedBox(height: 6),
+                      Text((_mediation!['tonight_action'] ?? '-').toString()),
+                      const SizedBox(height: 10),
+                      Text('72小时修复计划',
+                          style: Theme.of(context).textTheme.titleSmall),
+                      const SizedBox(height: 6),
+                      ...(((_mediation!['repair_plan_72h'] as List?) ?? [])
+                              .map((e) => '• ${(e as Map)['title']}'))
+                          .map((t) => Padding(
+                                padding: const EdgeInsets.only(bottom: 4),
+                                child: Text(t),
+                              )),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),
