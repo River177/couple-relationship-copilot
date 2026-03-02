@@ -5,3 +5,5 @@ python-dotenv==1.1.1
 sqlalchemy==2.0.43
 psycopg[binary]==3.2.9
 alembic==1.16.4
+boto3==1.39.13
+python-multipart==0.0.20
