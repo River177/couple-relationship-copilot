@@ -1,5 +1,6 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const CoupleCopilotApp());
@@ -10,8 +11,7 @@ class CoupleCopilotApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme =
-        ColorScheme.fromSeed(seedColor: const Color(0xFFE66FA6));
+    final colorScheme = ColorScheme.fromSeed(seedColor: const Color(0xFFE66FA6));
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Couple Copilot',
@@ -20,65 +20,480 @@ class CoupleCopilotApp extends StatelessWidget {
         colorScheme: colorScheme,
         scaffoldBackgroundColor: const Color(0xFFF8F6F8),
         appBarTheme: const AppBarTheme(centerTitle: false),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: Colors.white,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide.none,
-          ),
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      ),
+      home: const AppShell(),
+    );
+  }
+}
+
+class AppShell extends StatefulWidget {
+  const AppShell({super.key});
+
+  @override
+  State<AppShell> createState() => _AppShellState();
+}
+
+enum AppStage { loading, needLogin, needBind, ready }
+
+class _AppShellState extends State<AppShell> {
+  final _api = ApiClient();
+  AppStage _stage = AppStage.loading;
+  bool _busy = false;
+  String? _nickname;
+  String? _partnerNickname;
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    setState(() => _busy = true);
+    try {
+      await _api.loadSession();
+      if (_api.accessToken == null && _api.refreshToken == null) {
+        setState(() => _stage = AppStage.needLogin);
+        return;
+      }
+
+      var me = await _api.me();
+      if (me == null) {
+        final refreshed = await _api.refresh();
+        if (!refreshed) {
+          await _api.clearSession();
+          setState(() => _stage = AppStage.needLogin);
+          return;
+        }
+        me = await _api.me();
+      }
+
+      if (me == null) {
+        await _api.clearSession();
+        setState(() => _stage = AppStage.needLogin);
+        return;
+      }
+
+      final meData = me;
+      _nickname = meData.user.nickname;
+      _partnerNickname = meData.relationship.partnerNickname;
+      setState(() {
+        _stage = meData.relationship.status == 'bound' ? AppStage.ready : AppStage.needBind;
+      });
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _onLoginSuccess(LoginResult result) async {
+    await _api.saveSession(
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+    );
+    _nickname = result.user.nickname;
+    setState(() {
+      _stage = result.user.bindStatus == 'bound' ? AppStage.ready : AppStage.needBind;
+    });
+  }
+
+  Future<void> _refreshProfile() async {
+    final me = await _api.me();
+    if (me == null) return;
+    _nickname = me.user.nickname;
+    _partnerNickname = me.relationship.partnerNickname;
+    setState(() {
+      _stage = me.relationship.status == 'bound' ? AppStage.ready : AppStage.needBind;
+    });
+  }
+
+  Future<void> _logout() async {
+    await _api.clearSession();
+    setState(() {
+      _nickname = null;
+      _partnerNickname = null;
+      _stage = AppStage.needLogin;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_stage == AppStage.loading || _busy) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    switch (_stage) {
+      case AppStage.needLogin:
+        return LoginPage(api: _api, onSuccess: _onLoginSuccess);
+      case AppStage.needBind:
+        return BindPage(
+          api: _api,
+          nickname: _nickname ?? '你',
+          onBound: _refreshProfile,
+          onLogout: _logout,
+        );
+      case AppStage.ready:
+        return HomePage(
+          nickname: _nickname ?? '你',
+          partnerNickname: _partnerNickname,
+          api: _api,
+          onProfileChanged: _refreshProfile,
+          onLogout: _logout,
+        );
+      case AppStage.loading:
+        return const SizedBox.shrink();
+    }
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key, required this.api, required this.onSuccess});
+
+  final ApiClient api;
+  final Future<void> Function(LoginResult result) onSuccess;
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final _accountCtrl = TextEditingController();
+  final _codeCtrl = TextEditingController();
+  String _type = 'email';
+  bool _loading = false;
+  String? _devCode;
+
+  @override
+  void dispose() {
+    _accountCtrl.dispose();
+    _codeCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _sendCode() async {
+    if (_accountCtrl.text.trim().isEmpty) {
+      _toast('请输入邮箱或手机号');
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      final code = await widget.api.sendCode(_accountCtrl.text.trim(), _type);
+      setState(() => _devCode = code);
+      _toast('验证码已发送');
+    } on DioException catch (e) {
+      _toast('发送失败：${e.response?.data ?? e.message}');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _login() async {
+    if (_accountCtrl.text.trim().isEmpty || _codeCtrl.text.trim().isEmpty) {
+      _toast('请输入账号和验证码');
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      final result = await widget.api.login(_accountCtrl.text.trim(), _codeCtrl.text.trim());
+      await widget.onSuccess(result);
+    } on DioException catch (e) {
+      _toast('登录失败：${e.response?.data ?? e.message}');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('登录')), 
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            const Text('先登录，再绑定伴侣，不需要填写任何内部ID。'),
+            const SizedBox(height: 16),
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'email', label: Text('邮箱')),
+                ButtonSegment(value: 'phone', label: Text('手机号')),
+              ],
+              selected: {_type},
+              onSelectionChanged: (v) => setState(() => _type = v.first),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _accountCtrl,
+              decoration: InputDecoration(
+                labelText: _type == 'email' ? '邮箱' : '手机号',
+                border: const OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _codeCtrl,
+                    decoration: const InputDecoration(
+                      labelText: '验证码',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                FilledButton(
+                  onPressed: _loading ? null : _sendCode,
+                  child: const Text('发送验证码'),
+                ),
+              ],
+            ),
+            if (_devCode != null) ...[
+              const SizedBox(height: 10),
+              Text('开发环境验证码：$_devCode', style: const TextStyle(color: Colors.orange)),
+            ],
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: _loading ? null : _login,
+              icon: const Icon(Icons.login_rounded),
+              label: Text(_loading ? '登录中...' : '登录'),
+            )
+          ],
         ),
       ),
-      home: const HomePage(),
+    );
+  }
+}
+
+class BindPage extends StatefulWidget {
+  const BindPage({
+    super.key,
+    required this.api,
+    required this.nickname,
+    required this.onBound,
+    required this.onLogout,
+  });
+
+  final ApiClient api;
+  final String nickname;
+  final Future<void> Function() onBound;
+  final Future<void> Function() onLogout;
+
+  @override
+  State<BindPage> createState() => _BindPageState();
+}
+
+class _BindPageState extends State<BindPage> {
+  final _inviteCodeCtrl = TextEditingController();
+  bool _loading = false;
+  String? _myInviteCode;
+  DateTime? _expiresAt;
+
+  @override
+  void dispose() {
+    _inviteCodeCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _createInvite() async {
+    setState(() => _loading = true);
+    try {
+      final result = await widget.api.createInvite();
+      setState(() {
+        _myInviteCode = result.code;
+        _expiresAt = result.expiresAt;
+      });
+    } on DioException catch (e) {
+      _toast('创建失败：${e.response?.data ?? e.message}');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _joinInvite() async {
+    final code = _inviteCodeCtrl.text.trim();
+    if (code.isEmpty) {
+      _toast('请输入邀请码');
+      return;
+    }
+    setState(() => _loading = true);
+    try {
+      await widget.api.joinInvite(code);
+      await widget.onBound();
+    } on DioException catch (e) {
+      _toast('绑定失败：${e.response?.data ?? e.message}');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('关系绑定'),
+        actions: [
+          IconButton(
+            tooltip: '退出登录',
+            onPressed: _loading ? null : widget.onLogout,
+            icon: const Icon(Icons.logout_rounded),
+          )
+        ],
+      ),
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            Text('嗨，${widget.nickname}。先完成情侣绑定后再进入首页。'),
+            const SizedBox(height: 16),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('方式A：邀请伴侣'),
+                    const SizedBox(height: 8),
+                    FilledButton(
+                      onPressed: _loading ? null : _createInvite,
+                      child: const Text('生成邀请码'),
+                    ),
+                    if (_myInviteCode != null) ...[
+                      const SizedBox(height: 10),
+                      SelectableText('邀请码：$_myInviteCode', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      if (_expiresAt != null)
+                        Text('有效期至：${_expiresAt!.toLocal()}'),
+                    ]
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('方式B：输入邀请码'),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _inviteCodeCtrl,
+                      textCapitalization: TextCapitalization.characters,
+                      decoration: const InputDecoration(
+                        hintText: '例如 A1B2C3',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton.icon(
+                      onPressed: _loading ? null : _joinInvite,
+                      icon: const Icon(Icons.link_rounded),
+                      label: Text(_loading ? '处理中...' : '确认绑定'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
 
 class HomePage extends StatelessWidget {
-  const HomePage({super.key});
+  const HomePage({
+    super.key,
+    required this.nickname,
+    required this.partnerNickname,
+    required this.api,
+    required this.onProfileChanged,
+    required this.onLogout,
+  });
+
+  final String nickname;
+  final String? partnerNickname;
+  final ApiClient api;
+  final Future<void> Function() onProfileChanged;
+  final Future<void> Function() onLogout;
+
+  Future<void> _unbind(BuildContext context) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('确认解绑？'),
+        content: const Text('解绑后将回到绑定页。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('确认')),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    try {
+      await api.unbind();
+      await onProfileChanged();
+    } on DioException catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('解绑失败：${e.response?.data ?? e.message}')));
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Couple Relationship Copilot')),
+      appBar: AppBar(
+        title: const Text('Couple Relationship Copilot'),
+        actions: [
+          IconButton(
+            tooltip: '解绑关系',
+            onPressed: () => _unbind(context),
+            icon: const Icon(Icons.link_off_rounded),
+          ),
+          IconButton(
+            tooltip: '退出登录',
+            onPressed: onLogout,
+            icon: const Icon(Icons.logout_rounded),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
             _HeroCard(
-              title: '今天也一起把关系变好一点',
-              subtitle: 'Daily logging · Conflict mediation · Weekly check',
+              title: '你好，$nickname',
+              subtitle: partnerNickname == null ? '已登录' : '已与 $partnerNickname 绑定',
               icon: Icons.favorite_rounded,
               color: Theme.of(context).colorScheme.primary,
             ),
             const SizedBox(height: 16),
-            _EntryCard(
+            const _EntryCard(
               title: '日常记录',
-              subtitle: 'Daily journaling timeline',
+              subtitle: '下一步接接口改为自动使用登录态',
               icon: Icons.book_rounded,
-              onTap: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const DailyPage()),
-                );
-              },
             ),
             const SizedBox(height: 12),
-            _EntryCard(
+            const _EntryCard(
               title: '冲突调解',
-              subtitle: 'Conflict mediation workflow',
+              subtitle: '下一步去掉手填ID后接入',
               icon: Icons.balance_rounded,
-              onTap: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const ConflictPage()),
-                );
-              },
             ),
             const SizedBox(height: 12),
             const _EntryCard(
               title: '每周体检',
-              subtitle: 'Weekly relationship health check (next)',
+              subtitle: 'MVP 预留',
               icon: Icons.monitor_heart_rounded,
             ),
           ],
@@ -88,574 +503,187 @@ class HomePage extends StatelessWidget {
   }
 }
 
-class DailyPage extends StatefulWidget {
-  const DailyPage({super.key});
-
-  @override
-  State<DailyPage> createState() => _DailyPageState();
-}
-
-class _DailyPageState extends State<DailyPage> {
-  final _dio = Dio(BaseOptions(baseUrl: 'http://127.0.0.1:8000'));
-
-  final _coupleIdCtrl = TextEditingController();
-  final _authorIdCtrl = TextEditingController();
-  final _contentCtrl = TextEditingController();
-  final _mediaUrlsCtrl = TextEditingController();
-
-  int _moodScore = 4;
-  String _eventType = 'interaction';
-  bool _loading = false;
-  List<Map<String, dynamic>> _items = [];
-
-  @override
-  void dispose() {
-    _coupleIdCtrl.dispose();
-    _authorIdCtrl.dispose();
-    _contentCtrl.dispose();
-    _mediaUrlsCtrl.dispose();
-    super.dispose();
-  }
-
-  List<Map<String, dynamic>> _buildMediaListFromInput(String raw) {
-    final urls = raw
-        .split(RegExp(r'[\n,]'))
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty)
-        .toList();
-
-    return urls.asMap().entries.map((entry) {
-      final idx = entry.key;
-      final url = entry.value;
-      final lower = url.toLowerCase();
-      final isVideo = lower.endsWith('.mp4') ||
-          lower.endsWith('.mov') ||
-          lower.endsWith('.webm');
-      return {
-        'media_type': isVideo ? 'video' : 'image',
-        'url': url,
-        'sort_order': idx,
-      };
-    }).toList();
-  }
-
-  Future<void> _createDaily() async {
-    if (_coupleIdCtrl.text.isEmpty ||
-        _authorIdCtrl.text.isEmpty ||
-        _contentCtrl.text.isEmpty) {
-      _toast('couple_id / author_user_id / content 不能为空');
-      return;
-    }
-
-    setState(() => _loading = true);
-    try {
-      final media = _buildMediaListFromInput(_mediaUrlsCtrl.text);
-      await _dio.post(
-        '/daily',
-        data: {
-          'couple_id': _coupleIdCtrl.text.trim(),
-          'author_user_id': _authorIdCtrl.text.trim(),
-          'event_type': _eventType,
-          'mood_score': _moodScore,
-          'content': _contentCtrl.text.trim(),
-          'media': media,
-        },
-      );
-      _contentCtrl.clear();
-      _mediaUrlsCtrl.clear();
-      _toast('记录成功');
-      await _loadTimeline();
-    } on DioException catch (e) {
-      _toast('提交失败: ${e.response?.data ?? e.message}');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _loadTimeline() async {
-    if (_coupleIdCtrl.text.isEmpty) {
-      _toast('先输入 couple_id');
-      return;
-    }
-
-    setState(() => _loading = true);
-    try {
-      final resp = await _dio.get(
-        '/daily/timeline',
-        queryParameters: {'couple_id': _coupleIdCtrl.text.trim(), 'limit': 30},
-      );
-
-      final items = (resp.data['items'] as List?) ?? [];
-      setState(() {
-        _items = items.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-      });
-    } on DioException catch (e) {
-      _toast('加载失败: ${e.response?.data ?? e.message}');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  void _toast(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('日常记录'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh_rounded),
-            onPressed: _loading ? null : _loadTimeline,
+class ApiClient {
+  ApiClient()
+      : _dio = Dio(
+          BaseOptions(
+            baseUrl: 'http://127.0.0.1:8000',
+            connectTimeout: const Duration(seconds: 10),
+            receiveTimeout: const Duration(seconds: 15),
           ),
-        ],
-      ),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.04),
-                    blurRadius: 10,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              padding: const EdgeInsets.all(14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('创建记录', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _coupleIdCtrl,
-                    decoration: const InputDecoration(labelText: 'couple_id'),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _authorIdCtrl,
-                    decoration:
-                        const InputDecoration(labelText: 'author_user_id'),
-                  ),
-                  const SizedBox(height: 10),
-                  DropdownButtonFormField<String>(
-                    initialValue: _eventType,
-                    items: const [
-                      DropdownMenuItem(
-                          value: 'interaction', child: Text('interaction')),
-                      DropdownMenuItem(value: 'date', child: Text('date')),
-                      DropdownMenuItem(value: 'gift', child: Text('gift')),
-                      DropdownMenuItem(value: 'other', child: Text('other')),
-                    ],
-                    onChanged: (v) =>
-                        setState(() => _eventType = v ?? 'interaction'),
-                    decoration: const InputDecoration(labelText: 'event_type'),
-                  ),
-                  const SizedBox(height: 10),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: cs.primaryContainer.withValues(alpha: 0.45),
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.mood_rounded),
-                        const SizedBox(width: 8),
-                        const Text('mood'),
-                        Expanded(
-                          child: Slider(
-                            value: _moodScore.toDouble(),
-                            min: 1,
-                            max: 5,
-                            divisions: 4,
-                            label: '$_moodScore',
-                            onChanged: (v) =>
-                                setState(() => _moodScore = v.toInt()),
-                          ),
-                        ),
-                        Text('$_moodScore',
-                            style:
-                                const TextStyle(fontWeight: FontWeight.w700)),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _contentCtrl,
-                    decoration: const InputDecoration(labelText: 'content'),
-                    maxLines: 3,
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _mediaUrlsCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'media urls (逗号或换行分隔)',
-                      hintText: 'http://.../a.jpg\nhttp://.../b.mp4',
-                    ),
-                    maxLines: 3,
-                  ),
-                  const SizedBox(height: 14),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: _loading ? null : _createDaily,
-                      icon: const Icon(Icons.send_rounded),
-                      label: Text(_loading ? '处理中...' : '提交记录'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              children: [
-                Text('时间线', style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                Text('${_items.length} 条',
-                    style: Theme.of(context).textTheme.bodySmall),
-              ],
-            ),
-            const SizedBox(height: 8),
-            if (_items.isEmpty)
-              const _EmptyStateCard(text: '还没有记录，先创建第一条吧')
-            else
-              ..._items.map((item) {
-                final medias = (item['media'] as List?) ?? [];
-                return Card(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            _Tag(
-                                text:
-                                    item['event_type']?.toString() ?? 'other'),
-                            const SizedBox(width: 8),
-                            _Tag(text: 'mood ${item['mood_score']}'),
-                            const Spacer(),
-                            if ((item['memos_status'] ?? '')
-                                .toString()
-                                .isNotEmpty)
-                              Text(
-                                'MemOS: ${item['memos_status']}',
-                                style: TextStyle(
-                                  color: item['memos_status'] == 'synced'
-                                      ? Colors.green
-                                      : Colors.orange,
-                                  fontSize: 12,
-                                ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Text(item['content']?.toString() ?? ''),
-                        if (medias.isNotEmpty) ...[
-                          const SizedBox(height: 10),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: medias.map((m) {
-                              final mm = Map<String, dynamic>.from(m as Map);
-                              final type =
-                                  mm['media_type']?.toString() ?? 'image';
-                              return Chip(
-                                avatar: Icon(
-                                  type == 'video'
-                                      ? Icons.videocam_rounded
-                                      : Icons.image_rounded,
-                                  size: 16,
-                                ),
-                                label: Text(type),
-                              );
-                            }).toList(),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                );
-              }),
-            const SizedBox(height: 24),
-          ],
-        ),
-      ),
+        );
+
+  final Dio _dio;
+  String? accessToken;
+  String? refreshToken;
+
+  Future<void> loadSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    accessToken = prefs.getString('access_token');
+    refreshToken = prefs.getString('refresh_token');
+  }
+
+  Future<void> saveSession({required String accessToken, required String refreshToken}) async {
+    this.accessToken = accessToken;
+    this.refreshToken = refreshToken;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('access_token', accessToken);
+    await prefs.setString('refresh_token', refreshToken);
+  }
+
+  Future<void> clearSession() async {
+    accessToken = null;
+    refreshToken = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('access_token');
+    await prefs.remove('refresh_token');
+  }
+
+  Map<String, String> _authHeaders() {
+    if (accessToken == null) return {};
+    return {'Authorization': 'Bearer $accessToken'};
+  }
+
+  Future<String?> sendCode(String account, String type) async {
+    final resp = await _dio.post('/auth/send-code', data: {'account': account, 'type': type});
+    return resp.data['dev_code']?.toString();
+  }
+
+  Future<LoginResult> login(String account, String code) async {
+    final resp = await _dio.post('/auth/login', data: {'account': account, 'code': code});
+    return LoginResult.fromJson(Map<String, dynamic>.from(resp.data as Map));
+  }
+
+  Future<bool> refresh() async {
+    if (refreshToken == null) return false;
+    try {
+      final resp = await _dio.post('/auth/refresh', data: {'refresh_token': refreshToken});
+      accessToken = resp.data['access_token']?.toString();
+      final prefs = await SharedPreferences.getInstance();
+      if (accessToken != null) {
+        await prefs.setString('access_token', accessToken!);
+      }
+      return accessToken != null;
+    } on DioException {
+      return false;
+    }
+  }
+
+  Future<MeResult?> me() async {
+    if (accessToken == null) return null;
+    try {
+      final resp = await _dio.get('/auth/me', options: Options(headers: _authHeaders()));
+      return MeResult.fromJson(Map<String, dynamic>.from(resp.data as Map));
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 401) return null;
+      rethrow;
+    }
+  }
+
+  Future<InviteResult> createInvite() async {
+    final resp = await _dio.post('/relationship/invite', options: Options(headers: _authHeaders()));
+    return InviteResult.fromJson(Map<String, dynamic>.from(resp.data as Map));
+  }
+
+  Future<void> joinInvite(String code) async {
+    await _dio.post(
+      '/relationship/join',
+      data: {'invite_code': code},
+      options: Options(headers: _authHeaders()),
+    );
+  }
+
+  Future<void> unbind() async {
+    await _dio.post(
+      '/relationship/unbind',
+      data: {'confirm_text': 'UNBIND'},
+      options: Options(headers: _authHeaders()),
     );
   }
 }
 
-class ConflictPage extends StatefulWidget {
-  const ConflictPage({super.key});
+class LoginResult {
+  LoginResult({
+    required this.accessToken,
+    required this.refreshToken,
+    required this.user,
+  });
 
-  @override
-  State<ConflictPage> createState() => _ConflictPageState();
+  final String accessToken;
+  final String refreshToken;
+  final LoginUser user;
+
+  factory LoginResult.fromJson(Map<String, dynamic> json) {
+    return LoginResult(
+      accessToken: json['access_token'].toString(),
+      refreshToken: json['refresh_token'].toString(),
+      user: LoginUser.fromJson(Map<String, dynamic>.from(json['user'] as Map)),
+    );
+  }
 }
 
-class _ConflictPageState extends State<ConflictPage> {
-  final _dio = Dio(BaseOptions(baseUrl: 'http://127.0.0.1:8000'));
-  final _coupleIdCtrl = TextEditingController();
-  final _sessionIdCtrl = TextEditingController();
-  final _userIdCtrl = TextEditingController();
-  final _factsCtrl = TextEditingController();
-  final _feelingsCtrl = TextEditingController();
-  final _needsCtrl = TextEditingController();
-  final _expectationCtrl = TextEditingController();
+class LoginUser {
+  LoginUser({required this.nickname, required this.bindStatus});
 
-  int _emotionScore = 6;
-  bool _loading = false;
-  Map<String, dynamic>? _mediation;
+  final String nickname;
+  final String bindStatus;
 
-  @override
-  void dispose() {
-    _coupleIdCtrl.dispose();
-    _sessionIdCtrl.dispose();
-    _userIdCtrl.dispose();
-    _factsCtrl.dispose();
-    _feelingsCtrl.dispose();
-    _needsCtrl.dispose();
-    _expectationCtrl.dispose();
-    super.dispose();
+  factory LoginUser.fromJson(Map<String, dynamic> json) {
+    return LoginUser(
+      nickname: json['nickname']?.toString() ?? '',
+      bindStatus: json['bind_status']?.toString() ?? 'unbound',
+    );
   }
+}
 
-  void _toast(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+class MeResult {
+  MeResult({required this.user, required this.relationship});
+
+  final MeUser user;
+  final RelationshipInfo relationship;
+
+  factory MeResult.fromJson(Map<String, dynamic> json) {
+    return MeResult(
+      user: MeUser.fromJson(Map<String, dynamic>.from(json['user'] as Map)),
+      relationship: RelationshipInfo.fromJson(Map<String, dynamic>.from(json['relationship'] as Map)),
+    );
   }
+}
 
-  Future<void> _createSession() async {
-    if (_coupleIdCtrl.text.isEmpty) {
-      _toast('先输入 couple_id');
-      return;
-    }
-    setState(() => _loading = true);
-    try {
-      final resp = await _dio.post(
-        '/conflict/session',
-        queryParameters: {'couple_id': _coupleIdCtrl.text.trim()},
-      );
-      _sessionIdCtrl.text = (resp.data['id'] ?? '').toString();
-      _toast('冲突会话已创建');
-    } on DioException catch (e) {
-      _toast('创建失败: ${e.response?.data ?? e.message}');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+class MeUser {
+  MeUser({required this.nickname});
+
+  final String nickname;
+
+  factory MeUser.fromJson(Map<String, dynamic> json) {
+    return MeUser(nickname: json['nickname']?.toString() ?? '');
   }
+}
 
-  Future<void> _submitInput() async {
-    if (_sessionIdCtrl.text.isEmpty || _userIdCtrl.text.isEmpty) {
-      _toast('session_id / user_id 不能为空');
-      return;
-    }
-    setState(() => _loading = true);
-    try {
-      await _dio.post(
-        '/conflict/input',
-        data: {
-          'session_id': _sessionIdCtrl.text.trim(),
-          'user_id': _userIdCtrl.text.trim(),
-          'facts': _factsCtrl.text.trim(),
-          'feelings': _feelingsCtrl.text.trim(),
-          'needs': _needsCtrl.text.trim(),
-          'expectation': _expectationCtrl.text.trim().isEmpty
-              ? null
-              : _expectationCtrl.text.trim(),
-          'emotion_score': _emotionScore,
-        },
-      );
-      _toast('已提交一方输入');
-    } on DioException catch (e) {
-      _toast('提交失败: ${e.response?.data ?? e.message}');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+class RelationshipInfo {
+  RelationshipInfo({required this.status, this.partnerNickname});
+
+  final String status;
+  final String? partnerNickname;
+
+  factory RelationshipInfo.fromJson(Map<String, dynamic> json) {
+    return RelationshipInfo(
+      status: json['status']?.toString() ?? 'unbound',
+      partnerNickname: json['partner_nickname']?.toString(),
+    );
   }
+}
 
-  Future<void> _mediate() async {
-    if (_sessionIdCtrl.text.isEmpty) {
-      _toast('先输入 session_id');
-      return;
-    }
-    setState(() => _loading = true);
-    try {
-      final resp = await _dio.post(
-        '/conflict/mediate',
-        queryParameters: {'session_id': _sessionIdCtrl.text.trim()},
-      );
-      setState(() => _mediation = Map<String, dynamic>.from(resp.data as Map));
-      _toast('已生成调解建议');
-    } on DioException catch (e) {
-      _toast('调解失败: ${e.response?.data ?? e.message}');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
+class InviteResult {
+  InviteResult({required this.code, required this.expiresAt});
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('冲突调解')),
-      body: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('会话信息', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _coupleIdCtrl,
-                    decoration: const InputDecoration(labelText: 'couple_id'),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _sessionIdCtrl,
-                          decoration:
-                              const InputDecoration(labelText: 'session_id'),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      FilledButton(
-                        onPressed: _loading ? null : _createSession,
-                        child: const Text('创建'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 14),
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('一方输入', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _userIdCtrl,
-                    decoration: const InputDecoration(labelText: 'user_id'),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _factsCtrl,
-                    maxLines: 2,
-                    decoration: const InputDecoration(labelText: 'facts（事实）'),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _feelingsCtrl,
-                    maxLines: 2,
-                    decoration:
-                        const InputDecoration(labelText: 'feelings（感受）'),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _needsCtrl,
-                    maxLines: 2,
-                    decoration: const InputDecoration(labelText: 'needs（需求）'),
-                  ),
-                  const SizedBox(height: 10),
-                  TextField(
-                    controller: _expectationCtrl,
-                    maxLines: 2,
-                    decoration:
-                        const InputDecoration(labelText: 'expectation（期待，可选）'),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      const Text('emotion'),
-                      Expanded(
-                        child: Slider(
-                          value: _emotionScore.toDouble(),
-                          min: 1,
-                          max: 10,
-                          divisions: 9,
-                          label: '$_emotionScore',
-                          onChanged: (v) =>
-                              setState(() => _emotionScore = v.toInt()),
-                        ),
-                      ),
-                      Text('$_emotionScore'),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton.icon(
-                      onPressed: _loading ? null : _submitInput,
-                      icon: const Icon(Icons.send_rounded),
-                      label: const Text('提交输入'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 14),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton.tonalIcon(
-                onPressed: _loading ? null : _mediate,
-                icon: const Icon(Icons.auto_awesome_rounded),
-                label: Text(_loading ? '处理中...' : '生成调解建议'),
-              ),
-            ),
-            if (_mediation != null) ...[
-              const SizedBox(height: 14),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('今晚行动',
-                          style: Theme.of(context).textTheme.titleSmall),
-                      const SizedBox(height: 6),
-                      Text((_mediation!['tonight_action'] ?? '-').toString()),
-                      const SizedBox(height: 10),
-                      Text('72小时修复计划',
-                          style: Theme.of(context).textTheme.titleSmall),
-                      const SizedBox(height: 6),
-                      ...(((_mediation!['repair_plan_72h'] as List?) ?? [])
-                              .map((e) => '• ${(e as Map)['title']}'))
-                          .map((t) => Padding(
-                                padding: const EdgeInsets.only(bottom: 4),
-                                child: Text(t),
-                              )),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
+  final String code;
+  final DateTime? expiresAt;
+
+  factory InviteResult.fromJson(Map<String, dynamic> json) {
+    return InviteResult(
+      code: json['invite_code']?.toString() ?? '',
+      expiresAt: json['expires_at'] == null ? null : DateTime.tryParse(json['expires_at'].toString()),
     );
   }
 }
@@ -706,9 +734,7 @@ class _HeroCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Text(subtitle,
-                    style:
-                        const TextStyle(color: Colors.white70, fontSize: 12)),
+                Text(subtitle, style: const TextStyle(color: Colors.white70, fontSize: 12)),
               ],
             ),
           ),
@@ -722,70 +748,18 @@ class _EntryCard extends StatelessWidget {
   final String title;
   final String subtitle;
   final IconData icon;
-  final VoidCallback? onTap;
 
-  const _EntryCard({
-    required this.title,
-    required this.subtitle,
-    required this.icon,
-    this.onTap,
-  });
+  const _EntryCard({required this.title, required this.subtitle, required this.icon});
 
   @override
   Widget build(BuildContext context) {
     return Card(
       child: ListTile(
-        onTap: onTap,
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-        leading: CircleAvatar(
-          radius: 18,
-          child: Icon(icon, size: 18),
-        ),
+        leading: CircleAvatar(radius: 18, child: Icon(icon, size: 18)),
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
         subtitle: Text(subtitle),
-        trailing:
-            onTap != null ? const Icon(Icons.chevron_right_rounded) : null,
       ),
-    );
-  }
-}
-
-class _EmptyStateCard extends StatelessWidget {
-  final String text;
-
-  const _EmptyStateCard({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(14),
-      ),
-      child: Text(text, style: Theme.of(context).textTheme.bodyMedium),
-    );
-  }
-}
-
-class _Tag extends StatelessWidget {
-  final String text;
-
-  const _Tag({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: Theme.of(context)
-            .colorScheme
-            .primaryContainer
-            .withValues(alpha: 0.55),
-        borderRadius: BorderRadius.circular(99),
-      ),
-      child: Text(text,
-          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
     );
   }
 }

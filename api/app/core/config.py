@@ -22,5 +22,9 @@ class Settings:
     s3_use_ssl: bool = os.getenv("S3_USE_SSL", "false").lower() == "true"
     s3_public_base_url: str = os.getenv("S3_PUBLIC_BASE_URL", "http://localhost:9000")
 
+    jwt_secret: str = os.getenv("JWT_SECRET", "dev-only-change-me")
+    access_token_ttl_sec: int = int(os.getenv("ACCESS_TOKEN_TTL_SEC", "7200"))
+    refresh_token_ttl_days: int = int(os.getenv("REFRESH_TOKEN_TTL_DAYS", "30"))
+
 
 settings = Settings()

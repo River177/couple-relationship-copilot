@@ -20,6 +20,30 @@ Mobile-first AI product for couples:
 - `docs/` PRD / flows / API specs
 - `infra/` deployment and environment templates (e.g. MinIO compose)
 
+## 项目状态（2026-03-03）
+
+### 今日新增完成
+- 数据库重构已落库：新增认证会话、验证码、情侣邀请绑定相关结构（见 `api/sql/002_auth_and_binding_refactor.sql`）
+- 后端新增认证与关系绑定接口：
+  - `POST /auth/send-code`
+  - `POST /auth/login`
+  - `POST /auth/refresh`
+  - `GET /auth/me`
+  - `POST /relationship/invite`
+  - `POST /relationship/join`
+  - `GET /relationship/status`
+  - `POST /relationship/unbind`
+- 前端主流程已切换为用户视角：先登录、自动保持登录态、再完成情侣绑定（不再手填内部 ID）
+
+### 当前进行中（未收口）
+- 日常记录页、冲突调解页仍在迁移中：
+  - 目标是完全去掉手填 ID
+  - 改为基于登录态与当前关系自动流转
+- 本次会先把当前进度推送到 GitHub，后续继续迭代收口
+
+### 详细说明
+- 详见：`docs/项目进展与后续计划-2026-03-03.md`
+
 ## 项目状态（2026-03-02）
 
 ### 已完成
